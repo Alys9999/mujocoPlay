@@ -1,0 +1,44 @@
+<mujoco model="hidden_physics_phase1_franka_small_box">
+  <compiler angle="radian" meshdir="../../third_party/franka_emika_panda/assets" autolimits="true"/>
+  <include file="../../third_party/franka_emika_panda/panda.xml"/>
+
+  <option timestep="0.002" integrator="implicitfast" gravity="0 0 -9.81"/>
+  <visual>
+    <global offwidth="1280" offheight="960" azimuth="120" elevation="-20"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
+  <statistic center="0.45 0 0.35" extent="1"/>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <camera name="overview" pos="0.1 -1.1 0.75" xyaxes="1 0 0 0 0.62 0.78"/>
+    <camera name="bridge_shoulder" pos="0.00 -1.28 1.00" xyaxes="0.938471 -0.345357 0.0 0.164228 0.446271 0.879700" fovy="55"/>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <body name="mocap" mocap="true" pos="0.45 0.00 0.45">
+      <site name="mocap_site" size="0.008" rgba="0.10 0.10 0.90 0.35"/>
+    </body>
+
+    <geom name="target_zone" type="cylinder" pos="0.62 0.12 0.001" size="0.05 0.001" rgba="0.20 0.70 0.25 0.30" contype="0" conaffinity="0"/>
+
+    <body name="object" pos="0.52 -0.10 0.010">
+      <freejoint name="object_free"/>
+      <inertial pos="0 0 0" mass="0.12" diaginertia="0.000018 0.000010 0.000014"/>
+      <geom name="object_geom" type="box" size="0.016 0.011 0.010" rgba="0.87 0.37 0.31 1" friction="0.60 0.02 0.002"/>
+      <site name="object_site" pos="0 0 0" size="0.005"/>
+    </body>
+  </worldbody>
+
+  <sensor>
+    <force name="wrist_force" site="wrist_force_site"/>
+    <torque name="wrist_torque" site="wrist_force_site"/>
+  </sensor>
+</mujoco>

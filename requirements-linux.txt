@@ -1,0 +1,9 @@
+mujoco>=3.2,<4
+numpy>=2.0,<3
+torch>=2.5,<3
+torchvision>=0.20,<1
+transformers>=4.57,<5
+huggingface_hub>=0.32,<1
+safetensors>=0.4,<1
+pillow>=10,<12
+lerobot==0.5.0
