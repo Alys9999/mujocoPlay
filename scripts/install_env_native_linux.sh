@@ -27,11 +27,13 @@ sudo apt-get install -y \
 "$PYTHON_BIN" -m venv "$ROOT_DIR/$VENV_DIR"
 source "$ROOT_DIR/$VENV_DIR/bin/activate"
 
-python -m pip install --upgrade pip
-python -m pip install \
+PIP_CONFIG_FILE=/dev/null python -m pip install --upgrade pip
+PIP_CONFIG_FILE=/dev/null python -m pip install \
   "torch==${TORCH_VERSION}+${CUDA_WHL_TAG}" \
   "torchvision==${TORCHVISION_VERSION}+${CUDA_WHL_TAG}" \
   --index-url "https://download.pytorch.org/whl/${CUDA_WHL_TAG}"
-python -m pip install -r "$ROOT_DIR/requirements.txt"
+PIP_CONFIG_FILE=/dev/null python -m pip install \
+  --index-url "https://pypi.org/simple" \
+  -r "$ROOT_DIR/requirements.txt"
 
 python "$ROOT_DIR/verify_env.py"

@@ -4,6 +4,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+from .mujoco_runtime import configure_mujoco_gl
+
+configure_mujoco_gl()
+
 import mujoco
 import numpy as np
 

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from .mujoco_runtime import configure_mujoco_gl
+
+configure_mujoco_gl()
+
 import mujoco
 import numpy as np
 

@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from importlib import metadata
 from typing import Any
 
+from phase1.mujoco_runtime import configure_mujoco_gl
+
+configure_mujoco_gl()
+
 
 REQUIRED_MODULES = (
     ("numpy", "numpy"),

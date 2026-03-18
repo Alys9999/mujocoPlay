@@ -8,6 +8,11 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Protocol
 
+import imageio.v2 as imageio
+from .mujoco_runtime import configure_mujoco_gl
+
+configure_mujoco_gl()
+
 import mujoco
 import numpy as np
 
@@ -208,7 +213,13 @@ class AdaptiveBenchmarkSession:
 
     def close(self) -> None:
         """Release renderer resources."""
-        self.renderer.close()
+        renderer = getattr(self, "renderer", None)
+        if renderer is not None:
+            renderer.close()
+
+    def capture_frame(self) -> np.ndarray:
+        """Capture one RGB frame from the overview camera."""
+        return self.render_overview()
 
     def reset(
         self,
@@ -424,6 +435,8 @@ def rollout_policy(
     hidden_context: dict[str, dict[str, Any]],
     target_xy: np.ndarray,
     max_steps: int | None = None,
+    video_path: Path | None = None,
+    video_fps: int = 20,
 ) -> dict[str, Any]:
     """Roll out one sequential policy episode.
 
@@ -447,6 +460,9 @@ def rollout_policy(
     external_step_cap_reached = False
     step_limit = None if max_steps is None or int(max_steps) <= 0 else int(max_steps)
     steps_taken = 0
+    video_frames: list[np.ndarray] | None = [] if video_path is not None else None
+    if video_frames is not None:
+        video_frames.append(session.capture_frame())
     while not (terminated or truncated):
         if step_limit is not None and steps_taken >= step_limit:
             external_step_cap_reached = True
@@ -462,9 +478,15 @@ def rollout_policy(
             observe_transition(observation, action, reward, next_observation, terminated, truncated, info)
         observation = next_observation
         steps_taken += 1
+        if video_frames is not None:
+            video_frames.append(session.capture_frame())
     summary = session.summarize_episode()
     summary["benchmark_step_cap_reached"] = bool(external_step_cap_reached)
     summary["benchmark_max_steps"] = int(step_limit) if step_limit is not None else -1
+    if video_frames is not None and video_path is not None:
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(video_path, video_frames, fps=max(int(video_fps), 1))
+        summary["video_path"] = str(video_path)
     return summary
 
 
@@ -477,6 +499,8 @@ def evaluate_policy(
     seed: int,
     episodes: int,
     max_steps: int | None = None,
+    video_dir: Path | None = None,
+    video_fps: int = 20,
 ) -> list[dict[str, Any]]:
     """Evaluate one sequential policy over the selected latent split.
 
@@ -515,6 +539,12 @@ def evaluate_policy(
                 hidden_context=hidden_context,
                 target_xy=target_xy,
                 max_steps=max_steps,
+                video_path=(
+                    None
+                    if video_dir is None
+                    else video_dir / f"{policy.name}_{family}_{task}_{pipeline_name}_episode{episode_idx:03d}.mp4"
+                ),
+                video_fps=video_fps,
             )
             row["policy"] = policy.name
             row["split"] = split_name
@@ -612,6 +642,8 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("benchmark_results/phase1_policy_benchmark.md"))
+    parser.add_argument("--video-dir", type=Path, default=None)
+    parser.add_argument("--video-fps", type=int, default=20)
     args = parser.parse_args()
 
     pipeline_names = tuple(PIPELINE_SPECS) if args.pipeline == "all" else (args.pipeline or load_pipeline_name(args.pipeline_config),)
@@ -643,6 +675,8 @@ def main() -> None:
                         seed=args.seed,
                         episodes=args.episodes,
                         max_steps=args.max_steps,
+                        video_dir=args.video_dir,
+                        video_fps=args.video_fps,
                     )
                     for row in rows:
                         row["family_split"] = args.family_split

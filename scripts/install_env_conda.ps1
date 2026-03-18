@@ -15,9 +15,10 @@ if (-not $condaCmd) {
 conda create -y -n $EnvName "python=$PythonVersion"
 
 $pipInstallTorch = @"
+$env:PIP_CONFIG_FILE = "NUL"
 python -m pip install --upgrade pip
 python -m pip install torch==$TorchVersion+$CudaWhlTag torchvision==$TorchVisionVersion+$CudaWhlTag --index-url https://download.pytorch.org/whl/$CudaWhlTag
-python -m pip install -r `"$RootDir\requirements.txt`"
+python -m pip install --index-url https://pypi.org/simple -r `"$RootDir\requirements.txt`"
 python `"$RootDir\verify_env.py`"
 "@
 

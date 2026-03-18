@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 from typing import Any
 
+import draccus
 import numpy as np
 import torch
 from lerobot.policies.factory import make_pre_post_processors
@@ -15,6 +18,25 @@ PI05_IMAGE_KEYS = (
     "observation.images.left_wrist_0_rgb",
     "observation.images.right_wrist_0_rgb",
 )
+
+
+def _load_pi05_config(model_dir: Path) -> PI05Config:
+    config_path = model_dir / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"pi05 config not found: {config_path}")
+
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    # LeRobot 0.5 ships PI05Config behind a registry-based loader, but the
+    # downloaded checkpoint also stores a top-level `type` field that direct
+    # PI05Config parsing rejects. We strip that legacy field before decoding.
+    config_data.pop("type", None)
+
+    with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as handle:
+        json.dump(config_data, handle)
+        temp_config_path = handle.name
+
+    with draccus.config_type("json"):
+        return draccus.parse(PI05Config, temp_config_path, args=[])
 
 
 def _scale_to_unit_interval(value: np.ndarray, low: np.ndarray, high: np.ndarray) -> np.ndarray:
@@ -107,6 +129,7 @@ class PI05SequentialPolicy:
         gripper_index: int = 6,
         quantization: str | None = None,
         dtype: str | None = None,
+        num_inference_steps: int | None = None,
     ) -> None:
         self._model_path = None if model_path is None else str(model_path)
         self._device_name = None if device is None else str(device).strip().lower()
@@ -115,6 +138,7 @@ class PI05SequentialPolicy:
         self._gripper_index = int(gripper_index)
         self._quantization = None if quantization is None else str(quantization).strip().lower()
         self._dtype = None if dtype is None else str(dtype).strip().lower()
+        self._num_inference_steps = None if num_inference_steps is None else int(num_inference_steps)
         self._policy: PI05Policy | None = None
         self._preprocess = None
         self._postprocess = None
@@ -162,9 +186,11 @@ class PI05SequentialPolicy:
         if not model_dir.exists():
             raise FileNotFoundError(f"pi05 model path does not exist: {model_dir}")
 
-        config = PI05Config.from_pretrained(str(model_dir))
+        config = _load_pi05_config(model_dir)
         config.device = "cpu" if self._quantization != "none" else self._device_name
         config.dtype = self._dtype
+        if self._num_inference_steps is not None:
+            config.num_inference_steps = self._num_inference_steps
 
         self._policy = PI05Policy.from_pretrained(str(model_dir), config=config).eval()
         if self._quantization == "int8_dynamic":
@@ -218,12 +244,15 @@ class PI05SequentialPolicy:
         }
 
     def _build_batch(self, observation: dict[str, Any]) -> dict[str, Any]:
-        image = np.asarray(observation["overview_rgb"], dtype=np.uint8)
-        batch: dict[str, Any] = {
-            "observation.state": benchmark_observation_to_pi05_state(
+        image = torch.from_numpy(np.asarray(observation["overview_rgb"], dtype=np.uint8)).permute(2, 0, 1).contiguous()
+        state = torch.from_numpy(
+            benchmark_observation_to_pi05_state(
                 observation,
                 max_episode_steps=self._max_episode_steps,
-            ),
+            )
+        )
+        batch: dict[str, Any] = {
+            "observation.state": state,
             "task": str(observation["instruction"]),
             PI05_IMAGE_KEYS[0]: image,
         }
