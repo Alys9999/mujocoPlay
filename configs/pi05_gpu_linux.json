@@ -1,8 +1,0 @@
-{
-  "model_path": "external/models/pi05_base",
-  "device": "cuda",
-  "quantization": "none",
-  "dtype": "bfloat16",
-  "duplicate_overview_to_all_cameras": true,
-  "gripper_index": 6
-}

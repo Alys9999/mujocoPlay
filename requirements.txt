@@ -1,0 +1,9 @@
+mujoco>=3.2
+numpy>=2.0
+torch>=2.5
+torchvision>=0.20
+transformers>=4.57
+huggingface_hub>=0.32
+safetensors>=0.4
+pillow>=10
+lerobot==0.5.0
