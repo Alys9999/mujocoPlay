@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any, Protocol
 
 import imageio.v2 as imageio
+from tqdm.auto import tqdm
 from .mujoco_runtime import configure_mujoco_gl
 
 configure_mujoco_gl()
@@ -29,6 +32,16 @@ from .pipeline_config import (
 )
 from .splits import SPLITS, resolve_object_families
 from .task_language import build_instruction
+
+LOGGER = logging.getLogger(__name__)
+
+
+def configure_logging(level: str = "INFO") -> None:
+    numeric_level = getattr(logging, str(level).upper(), logging.INFO)
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 @dataclass
@@ -397,6 +410,8 @@ def build_policy(name: str, kwargs: dict[str, Any], seed: int) -> SequentialPoli
     if ":" not in name:
         raise ValueError(f"Unknown policy spec: {name}. Use 'random' or 'package.module:ClassName'.")
     module_name, class_name = name.split(":", maxsplit=1)
+    LOGGER.info("Building policy %s with seed=%s", name, seed)
+    started_at = time.perf_counter()
     module = importlib.import_module(module_name)
     policy_cls = getattr(module, class_name)
     policy = policy_cls(**kwargs)
@@ -406,6 +421,7 @@ def build_policy(name: str, kwargs: dict[str, Any], seed: int) -> SequentialPoli
         policy.requires_image = False
     if not hasattr(policy, "benchmark_interface"):
         policy.benchmark_interface = "default"
+    LOGGER.info("Built policy %s in %.2fs", getattr(policy, "name", class_name), time.perf_counter() - started_at)
     return policy
 
 
@@ -448,6 +464,14 @@ def rollout_policy(
         target_xy: Target XY location applied to the episode.
         max_steps: Optional benchmark-side step cap used for smoke tests.
     """
+    LOGGER.info(
+        "Starting episode seed=%s max_steps=%s requires_image=%s video=%s",
+        seed,
+        max_steps,
+        policy.requires_image,
+        str(video_path) if video_path is not None else "none",
+    )
+    started_at = time.perf_counter()
     policy.reset()
     observation = session.reset(
         seed=seed,
@@ -487,6 +511,14 @@ def rollout_policy(
         video_path.parent.mkdir(parents=True, exist_ok=True)
         imageio.mimsave(video_path, video_frames, fps=max(int(video_fps), 1))
         summary["video_path"] = str(video_path)
+    LOGGER.info(
+        "Finished episode seed=%s success=%s steps=%s capped=%s duration=%.2fs",
+        seed,
+        bool(summary["success"]),
+        int(summary["step_count"]),
+        bool(summary["benchmark_step_cap_reached"]),
+        time.perf_counter() - started_at,
+    )
     return summary
 
 
@@ -514,6 +546,16 @@ def evaluate_policy(
         episodes: Number of episodes to sample from the split distribution.
         max_steps: Optional benchmark-side step cap used for smoke tests.
     """
+    LOGGER.info(
+        "Evaluating policy=%s family=%s task=%s split=%s pipeline=%s episodes=%s",
+        policy.name,
+        family,
+        task,
+        split_name,
+        pipeline_name,
+        episodes,
+    )
+    started_at = time.perf_counter()
     session = make_benchmark_session(
         object_family=family,
         task_variant=task,
@@ -525,7 +567,13 @@ def evaluate_policy(
         if split_name not in SPLITS:
             raise ValueError(f"Unknown split: {split_name}")
         rng = np.random.default_rng(seed)
-        for episode_idx in range(episodes):
+        progress = tqdm(
+            range(episodes),
+            desc=f"{policy.name} {family}/{task} {pipeline_name}",
+            leave=True,
+            unit="ep",
+        )
+        for episode_idx in progress:
             hidden_context, target_xy = build_episode_setup(
                 pipeline_name=pipeline_name,
                 split_name=split_name,
@@ -550,8 +598,21 @@ def evaluate_policy(
             row["split"] = split_name
             row["pipeline"] = pipeline_name
             rows.append(row)
+            progress.set_postfix(
+                success=f"{row['success']:.0f}",
+                steps=int(row["step_count"]),
+                fail=int(row["failure_count"]),
+            )
     finally:
         session.close()
+    LOGGER.info(
+        "Completed evaluation policy=%s family=%s task=%s pipeline=%s in %.2fs",
+        policy.name,
+        family,
+        task,
+        pipeline_name,
+        time.perf_counter() - started_at,
+    )
     return rows
 
 
@@ -644,7 +705,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("benchmark_results/phase1_policy_benchmark.md"))
     parser.add_argument("--video-dir", type=Path, default=None)
     parser.add_argument("--video-fps", type=int, default=20)
+    parser.add_argument("--log-level", type=str, default="INFO")
     args = parser.parse_args()
+    configure_logging(args.log_level)
+    LOGGER.info("Starting benchmark with args=%s", vars(args))
 
     pipeline_names = tuple(PIPELINE_SPECS) if args.pipeline == "all" else (args.pipeline or load_pipeline_name(args.pipeline_config),)
     for pipeline_name in pipeline_names:
@@ -692,9 +756,14 @@ def main() -> None:
                     )
                     aggregates.append(aggregate)
                     all_rows.extend(rows)
-                    print(
-                        f"finished family={family} task={task} pipeline={pipeline_name} policy={policy.name} "
-                        f"success={aggregate['success_rate']:.3f} adapted={aggregate['adapted_success_rate']:.3f}"
+                    LOGGER.info(
+                        "Finished family=%s task=%s pipeline=%s policy=%s success=%.3f adapted=%.3f",
+                        family,
+                        task,
+                        pipeline_name,
+                        policy.name,
+                        aggregate["success_rate"],
+                        aggregate["adapted_success_rate"],
                     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -706,8 +775,8 @@ def main() -> None:
         json.dumps({"aggregates": aggregates, "episodes": all_rows}, indent=2),
         encoding="utf-8",
     )
-    print(f"saved={args.output}")
-    print(f"saved={args.output.with_suffix('.json')}")
+    LOGGER.info("Saved markdown to %s", args.output)
+    LOGGER.info("Saved json to %s", args.output.with_suffix(".json"))
 
 
 if __name__ == "__main__":

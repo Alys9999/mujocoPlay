@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,8 @@ import torch
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+
+LOGGER = logging.getLogger(__name__)
 
 
 PI05_IMAGE_KEYS = (
@@ -138,6 +142,7 @@ class PI05SequentialPolicy:
         self._gripper_index = int(gripper_index)
         self._quantization = None if quantization is None else str(quantization).strip().lower()
         self._dtype = None if dtype is None else str(dtype).strip().lower()
+        self._effective_dtype = self._dtype
         self._num_inference_steps = None if num_inference_steps is None else int(num_inference_steps)
         self._policy: PI05Policy | None = None
         self._preprocess = None
@@ -165,9 +170,12 @@ class PI05SequentialPolicy:
 
         batch = self._build_batch(observation)
         processed = self._preprocess(batch)
+        infer_started_at = time.perf_counter()
+        LOGGER.info("PI05 inference start device=%s dtype=%s", self._device_name, self._dtype)
         with torch.inference_mode():
             pred_action = self._policy.select_action(processed)
             pred_action = self._postprocess(pred_action)
+        LOGGER.info("PI05 inference finished in %.2fs", time.perf_counter() - infer_started_at)
         raw_action = np.asarray(pred_action.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
         return self._to_benchmark_action(raw_action)
 
@@ -186,21 +194,82 @@ class PI05SequentialPolicy:
         if not model_dir.exists():
             raise FileNotFoundError(f"pi05 model path does not exist: {model_dir}")
 
+        load_started_at = time.perf_counter()
+        LOGGER.info("PI05 config load start model_dir=%s", model_dir)
         config = _load_pi05_config(model_dir)
+        LOGGER.info("PI05 config load finished in %.2fs", time.perf_counter() - load_started_at)
         config.device = "cpu" if self._quantization != "none" else self._device_name
-        config.dtype = self._dtype
+        self._effective_dtype = self._resolve_runtime_dtype()
+        config.dtype = self._effective_dtype
         if self._num_inference_steps is not None:
             config.num_inference_steps = self._num_inference_steps
 
+        policy_load_started_at = time.perf_counter()
+        LOGGER.info(
+            "PI05 policy load start target_device=%s dtype=%s inference_steps=%s",
+            config.device,
+            config.dtype,
+            config.num_inference_steps,
+        )
         self._policy = PI05Policy.from_pretrained(str(model_dir), config=config).eval()
+        LOGGER.info("PI05 policy load finished in %.2fs", time.perf_counter() - policy_load_started_at)
         if self._quantization == "int8_dynamic":
             self._policy = self._apply_dynamic_int8_quantization(self._policy)
         elif self._quantization != "none":
             raise ValueError(f"Unsupported quantization mode: {self._quantization}")
 
-        feature_stats = self._build_identity_quantile_stats(config.max_state_dim, config.max_action_dim)
-        self._preprocess, self._postprocess = make_pre_post_processors(config, dataset_stats=feature_stats)
+        runtime_started_at = time.perf_counter()
+        LOGGER.info("PI05 runtime device/dtype application start")
+        self._apply_runtime_device_and_dtype()
+        LOGGER.info("PI05 runtime device/dtype application finished in %.2fs", time.perf_counter() - runtime_started_at)
+        policy_config = self._policy.config
+
+        preprocess_started_at = time.perf_counter()
+        LOGGER.info("PI05 processor construction start")
+        feature_stats = self._build_identity_quantile_stats(policy_config.max_state_dim, policy_config.max_action_dim)
+        self._preprocess, self._postprocess = make_pre_post_processors(policy_config, dataset_stats=feature_stats)
+        LOGGER.info("PI05 processor construction finished in %.2fs", time.perf_counter() - preprocess_started_at)
         self._policy.reset()
+        first_param = next(self._policy.parameters())
+        LOGGER.info(
+            "PI05 ready param_device=%s param_dtype=%s cuda_mem_alloc=%s cuda_mem_reserved=%s",
+            first_param.device,
+            first_param.dtype,
+            torch.cuda.memory_allocated() if torch.cuda.is_available() else 0,
+            torch.cuda.memory_reserved() if torch.cuda.is_available() else 0,
+        )
+
+    def _apply_runtime_device_and_dtype(self) -> None:
+        assert self._policy is not None
+        assert self._device_name is not None
+        assert self._effective_dtype is not None
+
+        self._policy.to(self._device_name)
+
+        if hasattr(self._policy, "model") and hasattr(self._policy.model, "to_bfloat16_for_selected_params"):
+            self._policy.model.to_bfloat16_for_selected_params(self._effective_dtype)
+        elif self._effective_dtype == "bfloat16":
+            self._policy.to(dtype=torch.bfloat16)
+        elif self._effective_dtype == "float32":
+            self._policy.to(dtype=torch.float32)
+        else:
+            raise ValueError(f"Unsupported dtype for runtime application: {self._effective_dtype}")
+
+        self._policy.config.device = self._device_name
+        self._policy.config.dtype = self._effective_dtype
+        self._policy.eval()
+
+    def _resolve_runtime_dtype(self) -> str:
+        assert self._dtype is not None
+        assert self._device_name is not None
+
+        if self._device_name == "cuda" and self._dtype == "bfloat16":
+            LOGGER.warning(
+                "PI05 requested dtype=bfloat16 on CUDA, but this runtime currently hits mixed Float/BFloat16 "
+                "errors during denoising. Falling back to float32 on GPU."
+            )
+            return "float32"
+        return self._dtype
 
     def _validate_runtime(self) -> None:
         if self._model_path is None:
