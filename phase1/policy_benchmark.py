@@ -383,14 +383,8 @@ def build_policy(name: str, kwargs: dict[str, Any], seed: int) -> SequentialPoli
     """
     if name == "random":
         return RandomPolicy(seed=seed, **kwargs)
-    if name == "pi05":
-        return PI05SequentialPolicy(**kwargs)
-    if name == "pi05-int8":
-        return PI05SequentialPolicy(device="cpu", quantization="int8_dynamic", **kwargs)
     if ":" not in name:
-        raise ValueError(
-            f"Unknown policy spec: {name}. Use 'random', 'pi05', 'pi05-int8', or 'package.module:ClassName'."
-        )
+        raise ValueError(f"Unknown policy spec: {name}. Use 'random' or 'package.module:ClassName'.")
     module_name, class_name = name.split(":", maxsplit=1)
     module = importlib.import_module(module_name)
     policy_cls = getattr(module, class_name)

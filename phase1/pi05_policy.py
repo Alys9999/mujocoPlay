@@ -100,25 +100,32 @@ class PI05SequentialPolicy:
 
     def __init__(
         self,
-        model_path: str = "external/models/pi05_base",
-        device: str = "auto",
+        model_path: str | None = None,
+        device: str | None = None,
         max_episode_steps: int = 1400,
-        duplicate_overview_to_all_cameras: bool = True,
+        duplicate_overview_to_all_cameras: bool | None = None,
         gripper_index: int = 6,
-        quantization: str = "none",
+        quantization: str | None = None,
         dtype: str | None = None,
     ) -> None:
-        self._model_path = str(model_path)
-        self._device_name = self._resolve_device(device)
+        self._model_path = None if model_path is None else str(model_path)
+        self._device_name = None if device is None else str(device).strip().lower()
         self._max_episode_steps = int(max_episode_steps)
-        self._duplicate_overview_to_all_cameras = bool(duplicate_overview_to_all_cameras)
+        self._duplicate_overview_to_all_cameras = duplicate_overview_to_all_cameras
         self._gripper_index = int(gripper_index)
-        self._quantization = str(quantization)
-        self._dtype = self._resolve_dtype(dtype)
+        self._quantization = None if quantization is None else str(quantization).strip().lower()
+        self._dtype = None if dtype is None else str(dtype).strip().lower()
         self._policy: PI05Policy | None = None
         self._preprocess = None
         self._postprocess = None
-        self.name = f"pi05_{self._device_name}_{self._quantization}_{Path(model_path).name.replace('.', '_')}"
+        name_parts = ["pi05"]
+        if self._device_name:
+            name_parts.append(self._device_name)
+        if self._quantization:
+            name_parts.append(self._quantization)
+        if self._model_path:
+            name_parts.append(Path(self._model_path).name.replace(".", "_"))
+        self.name = "_".join(name_parts)
 
     def reset(self) -> None:
         if self._policy is not None:
@@ -144,11 +151,17 @@ class PI05SequentialPolicy:
         if self._policy is not None and self._preprocess is not None and self._postprocess is not None:
             return
 
+        self._validate_runtime()
+        assert self._model_path is not None
+        assert self._device_name is not None
+        assert self._quantization is not None
+        assert self._dtype is not None
+        assert self._duplicate_overview_to_all_cameras is not None
+
         model_dir = Path(self._model_path)
         if not model_dir.exists():
             raise FileNotFoundError(f"pi05 model path does not exist: {model_dir}")
 
-        self._validate_runtime()
         config = PI05Config.from_pretrained(str(model_dir))
         config.device = "cpu" if self._quantization != "none" else self._device_name
         config.dtype = self._dtype
@@ -163,24 +176,19 @@ class PI05SequentialPolicy:
         self._preprocess, self._postprocess = make_pre_post_processors(config, dataset_stats=feature_stats)
         self._policy.reset()
 
-    def _resolve_device(self, device: str) -> str:
-        requested = str(device).strip().lower()
-        if requested == "auto":
-            if torch.cuda.is_available():
-                return "cuda"
-            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-                return "mps"
-            return "cpu"
-        return requested
-
-    def _resolve_dtype(self, dtype: str | None) -> str:
-        if dtype is not None:
-            return str(dtype)
-        if self._device_name == "cuda":
-            return "bfloat16"
-        return "float32"
-
     def _validate_runtime(self) -> None:
+        if self._model_path is None:
+            raise ValueError("PI05SequentialPolicy requires an explicit `model_path`.")
+        if self._device_name is None:
+            raise ValueError("PI05SequentialPolicy requires an explicit `device` such as `cpu` or `cuda`.")
+        if self._quantization is None:
+            raise ValueError("PI05SequentialPolicy requires an explicit `quantization` such as `none` or `int8_dynamic`.")
+        if self._dtype is None:
+            raise ValueError("PI05SequentialPolicy requires an explicit `dtype` such as `float32` or `bfloat16`.")
+        if self._duplicate_overview_to_all_cameras is None:
+            raise ValueError(
+                "PI05SequentialPolicy requires an explicit `duplicate_overview_to_all_cameras` setting."
+            )
         if self._quantization == "int8_dynamic" and self._device_name != "cpu":
             raise ValueError("`int8_dynamic` quantization is CPU-only. Use `device=cpu` or `quantization=none`.")
         if self._device_name == "cuda" and not torch.cuda.is_available():
