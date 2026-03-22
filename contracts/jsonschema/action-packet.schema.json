@@ -1,0 +1,252 @@
+{
+  "$defs": {
+    "ArmCommand": {
+      "additionalProperties": false,
+      "description": "Arm-control sub-command inside one action packet.",
+      "properties": {
+        "mode": {
+          "consumer": "ControlSchemaAdapter",
+          "description": "Arm control mode.",
+          "enum": [
+            "delta_pose",
+            "absolute_pose"
+          ],
+          "example": "delta_pose",
+          "producer": "PolicyAdapter",
+          "stability": "stable",
+          "title": "Mode",
+          "type": "string",
+          "visibility": "public",
+          "why": "Separates delta and absolute Cartesian commands without changing the scheduler loop."
+        },
+        "xyz": {
+          "consumer": "ControlSchemaAdapter",
+          "description": "Cartesian translation command in meters.",
+          "example": [
+            0.0,
+            0.0,
+            0.01
+          ],
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "producer": "PolicyAdapter",
+          "stability": "stable",
+          "title": "Xyz",
+          "type": "array",
+          "visibility": "public",
+          "why": "The canonical runtime contract always carries a Cartesian target or delta."
+        },
+        "rpy": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "consumer": "ControlSchemaAdapter",
+          "default": null,
+          "description": "XYZ Euler orientation command in radians.",
+          "example": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "producer": "PolicyAdapter",
+          "stability": "stable",
+          "title": "Rpy",
+          "visibility": "public",
+          "why": "Allows wrist orientation control without forcing all adapters to use quaternions."
+        },
+        "quat": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 4,
+              "minItems": 4,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "consumer": "ControlSchemaAdapter",
+          "default": null,
+          "description": "Quaternion orientation command when absolute pose is used.",
+          "example": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "producer": "PolicyAdapter",
+          "stability": "experimental",
+          "title": "Quat",
+          "visibility": "public",
+          "why": "Keeps compatibility with policies that emit absolute orientation as quaternions."
+        }
+      },
+      "required": [
+        "mode",
+        "xyz"
+      ],
+      "title": "ArmCommand",
+      "type": "object"
+    },
+    "HandCommand": {
+      "additionalProperties": false,
+      "description": "Hand-control sub-command inside one action packet.",
+      "properties": {
+        "mode": {
+          "consumer": "ControlSchemaAdapter",
+          "description": "Hand control mode.",
+          "enum": [
+            "scalar_close",
+            "finger_vector"
+          ],
+          "example": "scalar_close",
+          "producer": "PolicyAdapter",
+          "stability": "stable",
+          "title": "Mode",
+          "type": "string",
+          "visibility": "public",
+          "why": "Decouples different gripper topologies from the scheduler."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "consumer": "ControlSchemaAdapter",
+          "default": null,
+          "description": "Single close command in the unit interval.",
+          "example": 0.8,
+          "producer": "PolicyAdapter",
+          "stability": "stable",
+          "title": "Value",
+          "visibility": "public",
+          "why": "Supports current two-finger policies with one stable scalar interface."
+        },
+        "values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "consumer": "ControlSchemaAdapter",
+          "default": null,
+          "description": "Per-finger close commands in the unit interval.",
+          "example": [
+            0.75,
+            0.75,
+            0.75
+          ],
+          "producer": "PolicyAdapter",
+          "stability": "experimental",
+          "title": "Values",
+          "visibility": "public",
+          "why": "Pre-reserves a vector hand command for non-two-finger topologies."
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "HandCommand",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical action packet shared by all policy adapters.",
+  "properties": {
+    "schema_id": {
+      "consumer": "ControlSchemaAdapter",
+      "description": "Control schema identifier.",
+      "example": "cartesian_gripper_v1",
+      "producer": "PolicyAdapter",
+      "stability": "stable",
+      "title": "Schema Id",
+      "type": "string",
+      "visibility": "public",
+      "why": "Allows policy adapters and robot profiles to negotiate a stable control contract."
+    },
+    "arm": {
+      "$ref": "#/$defs/ArmCommand",
+      "consumer": "ControlSchemaAdapter",
+      "description": "Arm-control sub-command.",
+      "example": {
+        "mode": "delta_pose",
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "xyz": [
+          0.0,
+          0.0,
+          0.01
+        ]
+      },
+      "producer": "PolicyAdapter",
+      "stability": "stable",
+      "visibility": "public",
+      "why": "Keeps arm semantics explicit instead of hiding them in a flat action vector."
+    },
+    "hand": {
+      "$ref": "#/$defs/HandCommand",
+      "consumer": "ControlSchemaAdapter",
+      "description": "Hand-control sub-command.",
+      "example": {
+        "mode": "scalar_close",
+        "value": 0.8
+      },
+      "producer": "PolicyAdapter",
+      "stability": "stable",
+      "visibility": "public",
+      "why": "Lets different gripper topologies evolve without changing the scheduler loop."
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "consumer": "TraceSink",
+      "description": "Optional producer metadata for debugging and compatibility tracing.",
+      "example": {
+        "source": "pi05"
+      },
+      "producer": "PolicyAdapter",
+      "stability": "stable",
+      "title": "Metadata",
+      "type": "object",
+      "visibility": "public",
+      "why": "Captures adapter provenance without polluting control semantics."
+    }
+  },
+  "required": [
+    "schema_id",
+    "arm",
+    "hand"
+  ],
+  "title": "ActionPacket",
+  "type": "object"
+}

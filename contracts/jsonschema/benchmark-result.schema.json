@@ -1,0 +1,98 @@
+{
+  "additionalProperties": false,
+  "description": "Serialized benchmark result artifact.",
+  "properties": {
+    "run_id": {
+      "consumer": "ResultReader",
+      "description": "Stable run identifier.",
+      "example": "run_001",
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Run Id",
+      "type": "string",
+      "visibility": "public",
+      "why": "Lets external tools associate metrics and traces with the same run."
+    },
+    "benchmark_name": {
+      "consumer": "ResultReader",
+      "description": "Benchmark preset name.",
+      "example": "both_random_pick_place",
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Benchmark Name",
+      "type": "string",
+      "visibility": "public",
+      "why": "Makes result artifacts self-describing when moved out of the repo."
+    },
+    "policy_name": {
+      "consumer": "ResultReader",
+      "description": "Resolved policy adapter name.",
+      "example": "pi05_cpu",
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Policy Name",
+      "type": "string",
+      "visibility": "public",
+      "why": "Supports cross-policy comparisons without out-of-band metadata."
+    },
+    "aggregate_metrics": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "consumer": "ResultReader",
+      "description": "Aggregate benchmark metrics.",
+      "example": {
+        "success_rate": 0.5
+      },
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Aggregate Metrics",
+      "type": "object",
+      "visibility": "public",
+      "why": "Provides one stable summary object for dashboards and acceptance checks."
+    },
+    "episode_rows": {
+      "consumer": "ResultReader",
+      "description": "Per-episode metrics rows.",
+      "example": [
+        {
+          "object_family": "block",
+          "success": 1.0
+        }
+      ],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Episode Rows",
+      "type": "array",
+      "visibility": "public",
+      "why": "Retains the detailed evidence behind aggregate metrics."
+    },
+    "artifacts": {
+      "additionalProperties": true,
+      "consumer": "ResultReader",
+      "description": "Paths to emitted artifacts such as trace files or videos.",
+      "example": {
+        "trace_jsonl": "benchmark_results/run_001/trace.jsonl"
+      },
+      "producer": "BenchmarkScheduler",
+      "stability": "stable",
+      "title": "Artifacts",
+      "type": "object",
+      "visibility": "public",
+      "why": "Avoids coupling result consumers to fixed output directory conventions."
+    }
+  },
+  "required": [
+    "run_id",
+    "benchmark_name",
+    "policy_name",
+    "aggregate_metrics",
+    "episode_rows"
+  ],
+  "title": "BenchmarkResult",
+  "type": "object"
+}

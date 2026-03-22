@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tech Design Doc"
+  short_description: "Write design docs to the repo schema."
+  default_prompt: "Use $tech-design-doc-spec to draft or revise a technical design document that follows the repo schema."
