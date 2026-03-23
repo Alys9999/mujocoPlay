@@ -16,24 +16,30 @@ In scope:
 Not guaranteed by this repo:
 
 - any validated checkpoint source
-- any validated Linux setup flow
-- any validated GPU setup flow
+- any validated GPU setup flow beyond wheel installation and import checks
 - any validated quantized inference path
 
 ## Install Scripts
 
-These scripts pin the runtime to the versions currently expected by this repo:
+The native Linux installer is now intended to work on headless Ubuntu-class servers as well as desktop Linux. It uses:
 
-- Python `3.12`
+- Python `3.12+`
 - Torch `2.10.0`
 - TorchVision `0.25.0`
-- CUDA wheel runtime `cu128`
+- a torch wheel tag chosen automatically:
+  - `cpu` when no working NVIDIA driver is detected
+  - `cu128` when a working NVIDIA driver is detected
+- a MuJoCo GL backend chosen automatically:
+  - `osmesa` on headless CPU/server installs
+  - `egl` when a display, render node, or NVIDIA device is detected
 
 Files:
 
 - `scripts/install_env_conda.sh`
 - `scripts/install_env_conda.ps1`
+- `scripts/download_paligemma_tokenizer.sh`
 - `scripts/install_env_native_linux.sh`
+- `scripts/repair_ubuntu_apt_sources.sh`
 - `requirements.txt`
 
 Linux/macOS with conda:
@@ -54,10 +60,42 @@ Native Linux with system Python and venv:
 bash scripts/install_env_native_linux.sh
 ```
 
+Native Linux now requires a Python `3.12` interpreter. If your base distro does not ship `python3.12` in its normal apt repositories, use the conda installer instead or install Python `3.12` separately and pass `PYTHON_BIN=/path/to/python3.12`.
+
+If the host reports one Ubuntu release in `/etc/os-release` but `apt` is pinned to another codename, preview a repair with:
+
+```bash
+bash scripts/repair_ubuntu_apt_sources.sh
+```
+
+Apply the repair and refresh package indexes with:
+
+```bash
+bash scripts/repair_ubuntu_apt_sources.sh --apply
+```
+
+Useful overrides for native Linux:
+
+```bash
+PYTHON_BIN=python3.12 bash scripts/install_env_native_linux.sh
+TORCH_WHL_TAG=cpu bash scripts/install_env_native_linux.sh
+TORCH_WHL_TAG=cu128 VERIFY_ENV_REQUIRE_CUDA=1 bash scripts/install_env_native_linux.sh
+MUJOCO_GL_BACKEND=osmesa bash scripts/install_env_native_linux.sh
+SKIP_APT=1 bash scripts/install_env_native_linux.sh
+```
+
 All install scripts finish by running:
 
 ```bash
 python verify_env.py
+```
+
+On CPU-only or headless servers, `verify_env.py` treats missing CUDA as informational by default. Set `VERIFY_ENV_REQUIRE_CUDA=1` when you want the verification step to fail unless CUDA is actually available.
+
+For Ubuntu `22.04`, the recommended path is usually:
+
+```bash
+bash scripts/install_env_conda.sh
 ```
 
 ## Benchmark CLI
@@ -99,8 +137,15 @@ policy = PI05SequentialPolicy(
     quantization="none",
     dtype="float32",
     duplicate_overview_to_all_cameras=True,
+    tokenizer_name_or_path="/absolute/path/to/paligemma_tokenizer_or_hf_repo",
 )
 ```
+
+`tokenizer_name_or_path` is optional. When provided, it is passed to
+`transformers.AutoTokenizer.from_pretrained(...)`, so it can be either:
+
+- a local tokenizer directory
+- a Hugging Face repo id
 
 Example benchmark invocation:
 
@@ -109,7 +154,19 @@ python -m phase1.policy_benchmark \
   --task pick_place \
   --pipeline all \
   --policies phase1.pi05_policy:PI05SequentialPolicy \
-  --policy-kwargs '{"model_path":"/absolute/path/to/model","device":"cpu","quantization":"none","dtype":"float32","duplicate_overview_to_all_cameras":true}'
+  --policy-kwargs '{"model_path":"/absolute/path/to/model","device":"cpu","quantization":"none","dtype":"float32","duplicate_overview_to_all_cameras":true,"tokenizer_name_or_path":"/absolute/path/to/paligemma_tokenizer_or_hf_repo"}'
+```
+
+If you have access to the gated PaliGemma repo, download a local tokenizer directory with:
+
+```bash
+bash scripts/download_paligemma_tokenizer.sh
+```
+
+By default this writes to:
+
+```bash
+/root/models/paligemma-3b-pt-224
 ```
 
 ## Notes

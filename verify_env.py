@@ -49,10 +49,10 @@ def _import_module(module_name: str) -> tuple[Any | None, str | None]:
 
 def _check_python() -> CheckResult:
     version = platform.python_version()
-    ok = sys.version_info >= (3, 10)
+    ok = sys.version_info >= (3, 12)
     detail = f"python={version} executable={sys.executable}"
     if not ok:
-        detail += " required>=3.10"
+        detail += " required>=3.12"
     return CheckResult("python", ok, detail)
 
 

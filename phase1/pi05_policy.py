@@ -10,9 +10,11 @@ from typing import Any
 import draccus
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pi05.configuration_pi05 import PI05Config
 from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+from transformers import AutoTokenizer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -21,6 +23,17 @@ PI05_IMAGE_KEYS = (
     "observation.images.base_0_rgb",
     "observation.images.left_wrist_0_rgb",
     "observation.images.right_wrist_0_rgb",
+)
+PI05_DEFAULT_TOKENIZER_NAME = "google/paligemma-3b-pt-224"
+PI05_PUBLIC_FALLBACK_TOKENIZER_REPO = "pcuenq/gemma-tokenizer"
+PI05_PUBLIC_FALLBACK_TOKENIZER_DIR = Path.home() / "models" / "gemma-tokenizer-public"
+PI05_TOKENIZER_REQUIRED_FILES = (
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+)
+PI05_TOKENIZER_SERIALIZATION_FILES = (
+    "tokenizer.json",
+    "tokenizer.model",
 )
 
 
@@ -134,6 +147,7 @@ class PI05SequentialPolicy:
         quantization: str | None = None,
         dtype: str | None = None,
         num_inference_steps: int | None = None,
+        tokenizer_name_or_path: str | None = None,
     ) -> None:
         self._model_path = None if model_path is None else str(model_path)
         self._device_name = None if device is None else str(device).strip().lower()
@@ -144,6 +158,9 @@ class PI05SequentialPolicy:
         self._dtype = None if dtype is None else str(dtype).strip().lower()
         self._effective_dtype = self._dtype
         self._num_inference_steps = None if num_inference_steps is None else int(num_inference_steps)
+        self._tokenizer_name_or_path = (
+            None if tokenizer_name_or_path is None else str(tokenizer_name_or_path).strip()
+        )
         self._policy: PI05Policy | None = None
         self._preprocess = None
         self._postprocess = None
@@ -194,6 +211,14 @@ class PI05SequentialPolicy:
         if not model_dir.exists():
             raise FileNotFoundError(f"pi05 model path does not exist: {model_dir}")
 
+        tokenizer_started_at = time.perf_counter()
+        tokenizer = self._resolve_processor_tokenizer()
+        LOGGER.info(
+            "PI05 tokenizer ready in %.2fs source=%s",
+            time.perf_counter() - tokenizer_started_at,
+            getattr(tokenizer, "name_or_path", "<object>"),
+        )
+
         load_started_at = time.perf_counter()
         LOGGER.info("PI05 config load start model_dir=%s", model_dir)
         config = _load_pi05_config(model_dir)
@@ -227,7 +252,28 @@ class PI05SequentialPolicy:
         preprocess_started_at = time.perf_counter()
         LOGGER.info("PI05 processor construction start")
         feature_stats = self._build_identity_quantile_stats(policy_config.max_state_dim, policy_config.max_action_dim)
-        self._preprocess, self._postprocess = make_pre_post_processors(policy_config, dataset_stats=feature_stats)
+        preprocessor_overrides: dict[str, dict[str, Any]] = {
+            "normalizer_processor": {"stats": feature_stats},
+            "device_processor": {"device": self._device_name},
+            # Preload the tokenizer object so we do not depend on gated or partial
+            # Hugging Face downloads during processor instantiation.
+            "tokenizer_processor": {"tokenizer": tokenizer},
+        }
+
+        postprocessor_overrides: dict[str, dict[str, Any]] = {
+            "unnormalizer_processor": {"stats": feature_stats},
+            "device_processor": {"device": "cpu"},
+        }
+
+        # Prefer the checkpoint's saved processor configs so tokenizer/device wiring can
+        # be overridden locally without patching LeRobot itself.
+        self._preprocess, self._postprocess = make_pre_post_processors(
+            policy_config,
+            pretrained_path=str(model_dir),
+            preprocessor_overrides=preprocessor_overrides,
+            postprocessor_overrides=postprocessor_overrides,
+            dataset_stats=feature_stats,
+        )
         LOGGER.info("PI05 processor construction finished in %.2fs", time.perf_counter() - preprocess_started_at)
         self._policy.reset()
         first_param = next(self._policy.parameters())
@@ -293,6 +339,69 @@ class PI05SequentialPolicy:
                 raise ValueError("MPS was requested for PI05, but it is not available in this torch build/runtime.")
         if self._dtype == "bfloat16" and self._device_name not in {"cuda", "cpu"}:
             raise ValueError("`bfloat16` dtype is only supported here for `cpu` and `cuda`.")
+
+    def _resolve_processor_tokenizer(self) -> Any:
+        requested = self._tokenizer_name_or_path
+        attempts: list[str] = []
+
+        if requested:
+            requested_path = Path(requested).expanduser()
+            if requested_path.exists():
+                if self._tokenizer_dir_has_assets(requested_path):
+                    try:
+                        return AutoTokenizer.from_pretrained(str(requested_path), local_files_only=True)
+                    except Exception as exc:  # pragma: no cover - defensive path for local env drift.
+                        attempts.append(f"{requested_path}: {exc}")
+                else:
+                    attempts.append(
+                        f"{requested_path}: missing tokenizer files "
+                        f"({', '.join((*PI05_TOKENIZER_REQUIRED_FILES, *PI05_TOKENIZER_SERIALIZATION_FILES))})"
+                    )
+                    LOGGER.warning(
+                        "PI05 tokenizer override path %s exists but is incomplete; falling back to a public Gemma tokenizer.",
+                        requested_path,
+                    )
+            else:
+                try:
+                    return AutoTokenizer.from_pretrained(requested)
+                except Exception as exc:
+                    attempts.append(f"{requested}: {exc}")
+
+        fallback_dir = PI05_PUBLIC_FALLBACK_TOKENIZER_DIR
+        if self._tokenizer_dir_has_assets(fallback_dir):
+            try:
+                return AutoTokenizer.from_pretrained(str(fallback_dir), local_files_only=True)
+            except Exception as exc:  # pragma: no cover - defensive path for local env drift.
+                attempts.append(f"{fallback_dir}: {exc}")
+
+        try:
+            snapshot_download(
+                repo_id=PI05_PUBLIC_FALLBACK_TOKENIZER_REPO,
+                local_dir=str(fallback_dir),
+            )
+            return AutoTokenizer.from_pretrained(str(fallback_dir), local_files_only=True)
+        except Exception as exc:
+            attempts.append(f"{PI05_PUBLIC_FALLBACK_TOKENIZER_REPO}: {exc}")
+
+        message_lines = [
+            "PI05 could not load a tokenizer for the processor pipeline.",
+            f"Requested tokenizer: {requested or PI05_DEFAULT_TOKENIZER_NAME}",
+            "Tried the following sources:",
+            *[f"- {attempt}" for attempt in attempts],
+            (
+                "If you have accepted the gated PaliGemma license, download "
+                f"`{PI05_DEFAULT_TOKENIZER_NAME}` into a real local directory and pass it as "
+                "`tokenizer_name_or_path`."
+            ),
+        ]
+        raise ValueError("\n".join(message_lines))
+
+    def _tokenizer_dir_has_assets(self, path: Path) -> bool:
+        if not path.is_dir():
+            return False
+        has_required_files = all((path / filename).exists() for filename in PI05_TOKENIZER_REQUIRED_FILES)
+        has_serialized_tokenizer = any((path / filename).exists() for filename in PI05_TOKENIZER_SERIALIZATION_FILES)
+        return has_required_files and has_serialized_tokenizer
 
     def _apply_dynamic_int8_quantization(self, policy: PI05Policy) -> PI05Policy:
         if self._device_name != "cpu":

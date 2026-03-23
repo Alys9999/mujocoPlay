@@ -132,7 +132,7 @@ def create_default_registry() -> BenchmarkRegistry:
         "policy_adapters",
         "lerobot.smolvla",
         LeRobotSmolVLAAdapter,
-        description="LeRobot smolVLA/XVLA policy adapter.",
+        description="LeRobot SmolVLA policy adapter.",
     )
     registry.register(
         "trace_sinks",
