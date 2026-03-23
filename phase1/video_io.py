@@ -97,12 +97,52 @@ class AsyncVideoWriter:
             raise RuntimeError(f"Async video writing failed for {self.output_path}.") from self._worker_error
 
 
+def compose_video_views(*frames: np.ndarray) -> np.ndarray:
+    """Compose one or more HWC RGB views into a single side-by-side frame."""
+    valid_frames = [np.asarray(frame) for frame in frames if frame is not None]
+    if not valid_frames:
+        raise ValueError("compose_video_views requires at least one frame.")
+    if len(valid_frames) == 1:
+        return np.array(valid_frames[0], copy=True)
+
+    target_height = max(frame.shape[0] for frame in valid_frames)
+    padded_frames: list[np.ndarray] = []
+    for frame in valid_frames:
+        if frame.ndim != 3:
+            raise ValueError(f"Expected HWC RGB frame, got shape={frame.shape!r}.")
+        if frame.shape[0] == target_height:
+            padded_frames.append(np.array(frame, copy=True))
+            continue
+        pad_total = target_height - frame.shape[0]
+        pad_top = pad_total // 2
+        pad_bottom = pad_total - pad_top
+        padded_frames.append(
+            np.pad(
+                frame,
+                ((pad_top, pad_bottom), (0, 0), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+        )
+    return np.concatenate(padded_frames, axis=1)
+
+
 def resolve_video_frame(
     observation: dict[str, Any],
     capture_frame: Callable[[], np.ndarray],
 ) -> np.ndarray:
-    """Reuse an already-rendered observation image when available."""
-    frame = observation.get("overview_rgb")
-    if frame is not None:
-        return np.array(frame, copy=True)
+    """Reuse already-rendered PI05 input views when available."""
+    base_frame = observation.get("base_rgb")
+    if base_frame is None:
+        base_frame = observation.get("overview_rgb")
+
+    arm_frame = observation.get("arm_rgb")
+    if arm_frame is None:
+        arm_frame = observation.get("left_wrist_rgb")
+    if arm_frame is None:
+        arm_frame = observation.get("right_wrist_rgb")
+    if base_frame is not None:
+        if arm_frame is not None and not np.array_equal(base_frame, arm_frame):
+            return compose_video_views(base_frame, arm_frame)
+        return np.array(base_frame, copy=True)
     return capture_frame()

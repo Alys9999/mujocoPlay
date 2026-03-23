@@ -54,9 +54,9 @@ class FrankaHiddenPhysicsPickPlaceEnv:
         hold_steps=40,
     )
     OBJECT_TARGET_OFFSETS = {
-        "block": (-0.025, 0.0, 0.025),
+        "block": (-0.025, 0.0, 0.0265),
         "cylinder": (-0.022, 0.0, 0.028),
-        "small_box": (-0.022, 0.0, 0.024),
+        "small_box": (-0.022, 0.0, 0.0260),
     }
     MIN_CLOSE_FRACTION = {
         "block": 0.94,

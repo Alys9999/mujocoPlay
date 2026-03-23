@@ -142,6 +142,7 @@ class PI05SequentialPolicy:
         model_path: str | None = None,
         device: str | None = None,
         max_episode_steps: int = 1400,
+        action_chunk_size: int | None = 10,
         duplicate_overview_to_all_cameras: bool | None = None,
         gripper_index: int = 6,
         quantization: str | None = None,
@@ -152,6 +153,7 @@ class PI05SequentialPolicy:
         self._model_path = None if model_path is None else str(model_path)
         self._device_name = None if device is None else str(device).strip().lower()
         self._max_episode_steps = int(max_episode_steps)
+        self._action_chunk_size = None if action_chunk_size is None else int(action_chunk_size)
         self._duplicate_overview_to_all_cameras = duplicate_overview_to_all_cameras
         self._gripper_index = int(gripper_index)
         self._quantization = None if quantization is None else str(quantization).strip().lower()
@@ -178,23 +180,55 @@ class PI05SequentialPolicy:
             self._policy.reset()
 
     def act(self, observation: dict[str, Any]) -> np.ndarray:
-        if "overview_rgb" not in observation:
-            raise ValueError("PI05SequentialPolicy requires `overview_rgb` in the observation.")
         self._ensure_loaded()
         assert self._policy is not None
         assert self._preprocess is not None
         assert self._postprocess is not None
 
-        batch = self._build_batch(observation)
-        processed = self._preprocess(batch)
+        cached_actions = self._cached_action_count()
+        if cached_actions == 0 and "overview_rgb" not in observation:
+            raise ValueError("PI05SequentialPolicy requires `overview_rgb` when a fresh action chunk is needed.")
         infer_started_at = time.perf_counter()
-        LOGGER.info("PI05 inference start device=%s dtype=%s", self._device_name, self._dtype)
-        with torch.inference_mode():
-            pred_action = self._policy.select_action(processed)
-            pred_action = self._postprocess(pred_action)
-        LOGGER.info("PI05 inference finished in %.2fs", time.perf_counter() - infer_started_at)
+        LOGGER.info(
+            "PI05 action request device=%s dtype=%s cached_actions=%s",
+            self._device_name,
+            self._dtype,
+            cached_actions,
+        )
+        if cached_actions > 0:
+            with torch.inference_mode():
+                pred_action = self._policy.select_action({})
+                pred_action = self._postprocess(pred_action)
+            LOGGER.info(
+                "PI05 reused cached action in %.2fs remaining_cached_actions=%s",
+                time.perf_counter() - infer_started_at,
+                self._cached_action_count(),
+            )
+        else:
+            preprocess_started_at = time.perf_counter()
+            batch = self._build_batch(observation)
+            processed = self._preprocess(batch)
+            preprocess_duration = time.perf_counter() - preprocess_started_at
+            compute_started_at = time.perf_counter()
+            if self._device_name == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            with torch.inference_mode():
+                pred_action = self._policy.select_action(processed)
+                pred_action = self._postprocess(pred_action)
+            if self._device_name == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            LOGGER.info(
+                "PI05 generated action chunk preprocess=%.2fs infer=%.2fs total=%.2fs remaining_cached_actions=%s",
+                preprocess_duration,
+                time.perf_counter() - compute_started_at,
+                time.perf_counter() - infer_started_at,
+                self._cached_action_count(),
+            )
         raw_action = np.asarray(pred_action.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
         return self._to_benchmark_action(raw_action)
+
+    def needs_image_next_step(self) -> bool:
+        return self._cached_action_count() == 0
 
     def _ensure_loaded(self) -> None:
         if self._policy is not None and self._preprocess is not None and self._postprocess is not None:
@@ -226,6 +260,9 @@ class PI05SequentialPolicy:
         config.device = "cpu" if self._quantization != "none" else self._device_name
         self._effective_dtype = self._resolve_runtime_dtype()
         config.dtype = self._effective_dtype
+        if self._action_chunk_size is not None:
+            config.chunk_size = self._action_chunk_size
+            config.n_action_steps = self._action_chunk_size
         if self._num_inference_steps is not None:
             config.num_inference_steps = self._num_inference_steps
 
@@ -339,6 +376,8 @@ class PI05SequentialPolicy:
                 raise ValueError("MPS was requested for PI05, but it is not available in this torch build/runtime.")
         if self._dtype == "bfloat16" and self._device_name not in {"cuda", "cpu"}:
             raise ValueError("`bfloat16` dtype is only supported here for `cpu` and `cuda`.")
+        if self._action_chunk_size is not None and self._action_chunk_size <= 0:
+            raise ValueError("`action_chunk_size` must be a positive integer when provided.")
 
     def _resolve_processor_tokenizer(self) -> Any:
         requested = self._tokenizer_name_or_path
@@ -409,6 +448,14 @@ class PI05SequentialPolicy:
         quantized_model = torch.ao.quantization.quantize_dynamic(policy, {torch.nn.Linear}, dtype=torch.qint8)
         return quantized_model
 
+    def _cached_action_count(self) -> int:
+        if self._policy is None:
+            return 0
+        action_queue = getattr(self._policy, "_action_queue", None)
+        if action_queue is None:
+            return 0
+        return len(action_queue)
+
     def _build_identity_quantile_stats(self, state_dim: int, action_dim: int) -> dict[str, dict[str, torch.Tensor]]:
         return {
             "observation.state": {
@@ -422,7 +469,9 @@ class PI05SequentialPolicy:
         }
 
     def _build_batch(self, observation: dict[str, Any]) -> dict[str, Any]:
-        image = torch.from_numpy(np.asarray(observation["overview_rgb"], dtype=np.uint8)).permute(2, 0, 1).contiguous()
+        base_image = torch.from_numpy(
+            np.asarray(observation.get("base_rgb", observation["overview_rgb"]), dtype=np.uint8)
+        ).permute(2, 0, 1).contiguous()
         state = torch.from_numpy(
             benchmark_observation_to_pi05_state(
                 observation,
@@ -432,11 +481,24 @@ class PI05SequentialPolicy:
         batch: dict[str, Any] = {
             "observation.state": state,
             "task": str(observation["instruction"]),
-            PI05_IMAGE_KEYS[0]: image,
+            PI05_IMAGE_KEYS[0]: base_image,
         }
         if self._duplicate_overview_to_all_cameras:
-            batch[PI05_IMAGE_KEYS[1]] = image
-            batch[PI05_IMAGE_KEYS[2]] = image
+            batch[PI05_IMAGE_KEYS[1]] = torch.from_numpy(
+                np.asarray(observation.get("left_wrist_rgb", observation["overview_rgb"]), dtype=np.uint8)
+            ).permute(2, 0, 1).contiguous()
+            batch[PI05_IMAGE_KEYS[2]] = torch.from_numpy(
+                np.asarray(observation.get("right_wrist_rgb", observation["overview_rgb"]), dtype=np.uint8)
+            ).permute(2, 0, 1).contiguous()
+        else:
+            if "left_wrist_rgb" in observation:
+                batch[PI05_IMAGE_KEYS[1]] = torch.from_numpy(
+                    np.asarray(observation["left_wrist_rgb"], dtype=np.uint8)
+                ).permute(2, 0, 1).contiguous()
+            if "right_wrist_rgb" in observation:
+                batch[PI05_IMAGE_KEYS[2]] = torch.from_numpy(
+                    np.asarray(observation["right_wrist_rgb"], dtype=np.uint8)
+                ).permute(2, 0, 1).contiguous()
         return batch
 
     def _to_benchmark_action(self, raw_action: np.ndarray) -> np.ndarray:

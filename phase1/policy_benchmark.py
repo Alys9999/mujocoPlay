@@ -31,7 +31,7 @@ from .pipeline_config import (
 )
 from .splits import SPLITS, resolve_object_families
 from .task_language import build_instruction
-from .video_io import AsyncVideoWriter, resolve_video_frame
+from .video_io import AsyncVideoWriter, compose_video_views, resolve_video_frame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -232,8 +232,17 @@ class AdaptiveBenchmarkSession:
             renderer.close()
 
     def capture_frame(self) -> np.ndarray:
-        """Capture one RGB frame from the overview camera."""
-        return self.render_overview()
+        """Capture a composite frame that matches the PI05 visual inputs."""
+        return compose_video_views(
+            self.render_overview(),
+            self.render_camera("arm_attached"),
+        )
+
+    def render_camera(self, camera_name: str) -> np.ndarray:
+        """Render a named camera image."""
+        self.renderer.update_scene(self.env.data, camera=camera_name)
+        self.renderer.render(out=self._render_rgb_buffer)
+        return self._render_rgb_buffer.copy()
 
     def reset(
         self,
@@ -285,10 +294,8 @@ class AdaptiveBenchmarkSession:
         return public_obs, reward, terminated, truncated, info
 
     def render_overview(self) -> np.ndarray:
-        """Render the overview camera image."""
-        self.renderer.update_scene(self.env.data, camera="overview")
-        self.renderer.render(out=self._render_rgb_buffer)
-        return self._render_rgb_buffer.copy()
+        """Render the over-the-shoulder camera image used as the PI05 base view."""
+        return self.render_camera("bridge_shoulder")
 
     def get_public_observation(self, include_image: bool = False) -> dict[str, Any]:
         """Build the non-privileged observation exposed to benchmarked policies.
@@ -315,7 +322,13 @@ class AdaptiveBenchmarkSession:
             "previous_action": np.array(self._previous_action, copy=True),
         }
         if include_image:
-            observation["overview_rgb"] = self.render_overview()
+            base_frame = self.render_overview()
+            arm_frame = self.render_camera("arm_attached")
+            observation["overview_rgb"] = base_frame
+            observation["base_rgb"] = base_frame
+            observation["arm_rgb"] = arm_frame
+            observation["left_wrist_rgb"] = arm_frame
+            observation["right_wrist_rgb"] = arm_frame
         return observation
 
     def summarize_episode(self) -> dict[str, Any]:
@@ -427,6 +440,14 @@ def build_policy(name: str, kwargs: dict[str, Any], seed: int) -> SequentialPoli
     return policy
 
 
+def policy_needs_image_next_step(policy: SequentialPolicy) -> bool:
+    """Return whether the next observation should include a rendered image."""
+    needs_image = getattr(policy, "needs_image_next_step", None)
+    if callable(needs_image):
+        return bool(needs_image())
+    return bool(policy.requires_image)
+
+
 def make_benchmark_session(
     object_family: str,
     task_variant: str,
@@ -504,9 +525,10 @@ def rollout_policy(
                 truncated = True
                 break
             action = np.asarray(policy.act(observation), dtype=float)
+            next_observation_requires_image = policy_needs_image_next_step(policy)
             next_observation, reward, terminated, truncated, info = session.step(
                 action,
-                include_image=policy.requires_image,
+                include_image=next_observation_requires_image,
             )
             observe_transition = getattr(policy, "observe_transition", None)
             if callable(observe_transition):

@@ -19,7 +19,7 @@
 
   <worldbody>
     <camera name="overview" pos="0.1 -1.1 0.75" xyaxes="1 0 0 0 0.62 0.78"/>
-    <camera name="bridge_shoulder" pos="0.00 -1.28 1.00" xyaxes="0.938471 -0.345357 0.0 0.164228 0.446271 0.879700" fovy="55"/>
+    <camera name="bridge_shoulder" pos="-0.10 -1.62 1.18" xyaxes="0.938471 -0.345357 0.0 0.164228 0.446271 0.879700" fovy="62"/>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 

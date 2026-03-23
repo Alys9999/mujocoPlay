@@ -15,7 +15,7 @@ It covers:
 All commands below assume you are starting from the repo root:
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 ```
 
 ## 1. Recommended host setup
@@ -31,8 +31,8 @@ This repo currently works best with the conda installer. The older native `.venv
 If you already switched to conda and still have old native venv folders from earlier attempts, it is safe to remove them:
 
 ```bash
-rm -rf /root/mujocoBench/mujocoPlay/.venv-native
-rm -rf /root/mujocoBench/mujocoPlay/.venv-native-jammy
+rm -rf /root/mujocoBenchmark/mujocoPlay/.venv-native
+rm -rf /root/mujocoBenchmark/mujocoPlay/.venv-native-jammy
 ```
 
 ## 2. Optional: repair apt sources first
@@ -176,7 +176,7 @@ First, request access for your Hugging Face account:
 Then download the tokenizer files:
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 bash scripts/download_paligemma_tokenizer.sh
 ```
 
@@ -206,7 +206,7 @@ Use this when you do not have gated PaliGemma access, or when you want a determi
 Scripted download:
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 bash scripts/download_public_gemma_tokenizer.sh
 ```
 
@@ -230,31 +230,41 @@ Notes:
 - If you pass `tokenizer_name_or_path`, point it at a real directory such as `/root/models/gemma-tokenizer-public`.
 - If you omit `tokenizer_name_or_path`, the adapter will try to download and cache the public fallback automatically.
 
-### 6.4 PI05 smoke test
+### 6.4 PI05 short smoke test
 
-Run a small smoke test before the full benchmark:
+Run a short smoke test first. This keeps the run quick while still exercising model load, camera input, rollout, and video writing.
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 conda run -n mujocoplay python -m phase1.policy_benchmark \
+  --family block \
+  --task pick_place \
   --pipeline normal_pick_place \
-  --episodes 2 \
+  --episodes 1 \
+  --max-steps 20 \
   --policies phase1.pi05_policy:PI05SequentialPolicy \
-  --policy-kwargs '{"model_path":"/root/models/pi05_base","device":"cuda","quantization":"none","dtype":"float32","duplicate_overview_to_all_cameras":true,"tokenizer_name_or_path":"/root/models/gemma-tokenizer-public"}' \
-  --output benchmark_results/pi05_smoke.md \
-  --video-dir benchmark_results/pi05_smoke_videos
+  --policy-kwargs '{"model_path":"/root/models/pi05_base","device":"cuda","quantization":"none","dtype":"float32","action_chunk_size":10,"duplicate_overview_to_all_cameras":true,"tokenizer_name_or_path":"/root/models/gemma-tokenizer-public"}' \
+  --output benchmark_results/pi05_smoke_short.md \
+  --video-dir benchmark_results/pi05_smoke_short_videos
 ```
 
 If you successfully downloaded the official gated tokenizer, replace `/root/models/gemma-tokenizer-public` with `/root/models/paligemma-3b-pt-224`.
 
-### 6.5 PI05 full benchmark
+### 6.5 PI05 full pipeline benchmark
+
+This is the full benchmark command for PI05 across all configured pipelines.
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 conda run -n mujocoplay python -m phase1.policy_benchmark \
+  --family all \
+  --family-split all \
+  --task pick_place \
+  --split unseen \
   --pipeline all \
+  --episodes 24 \
   --policies phase1.pi05_policy:PI05SequentialPolicy \
-  --policy-kwargs '{"model_path":"/root/models/pi05_base","device":"cuda","quantization":"none","dtype":"float32","duplicate_overview_to_all_cameras":true,"tokenizer_name_or_path":"/root/models/gemma-tokenizer-public"}' \
+  --policy-kwargs '{"model_path":"/root/models/pi05_base","device":"cuda","quantization":"none","dtype":"float32","action_chunk_size":10,"duplicate_overview_to_all_cameras":true,"tokenizer_name_or_path":"/root/models/gemma-tokenizer-public"}' \
   --output benchmark_results/pi05_full.md \
   --video-dir benchmark_results/pi05_full_videos
 ```
@@ -304,7 +314,7 @@ SmolVLA also depends on the public VLM backbone `HuggingFaceTB/SmolVLM2-500M-Vid
 ### 7.3 SmolVLA smoke test
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 conda run -n mujocoplay python -m benchmark \
   --preset normal_pick_place \
   --episodes 2 \
@@ -317,7 +327,7 @@ conda run -n mujocoplay python -m benchmark \
 ### 7.4 SmolVLA full benchmark
 
 ```bash
-cd /root/mujocoBench/mujocoPlay
+cd /root/mujocoBenchmark/mujocoPlay
 conda run -n mujocoplay python -m benchmark \
   --preset both_random_pick_place \
   --output-dir benchmark_results/smolvla_full \
