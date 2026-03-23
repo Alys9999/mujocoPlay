@@ -4,13 +4,13 @@ import argparse
 import importlib
 import json
 import logging
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any, Protocol
 
-import imageio.v2 as imageio
 from tqdm.auto import tqdm
 from .mujoco_runtime import configure_mujoco_gl
 
@@ -22,7 +22,6 @@ import numpy as np
 from .adaptation_env import FrankaLatentAdaptationEnv
 from .benchmark_spec import OBJECT_FAMILY_SPECS, TASK_VARIANT_SPECS
 from .cli_utils import parse_mapping_arg
-from .pi05_policy import PI05SequentialPolicy
 from .pipeline_config import (
     DEFAULT_PIPELINE_CONFIG_PATH,
     PIPELINE_SPECS,
@@ -32,6 +31,7 @@ from .pipeline_config import (
 )
 from .splits import SPLITS, resolve_object_families
 from .task_language import build_instruction
+from .video_io import AsyncVideoWriter, resolve_video_frame
 
 LOGGER = logging.getLogger(__name__)
 
@@ -210,6 +210,7 @@ class AdaptiveBenchmarkSession:
         """
         self.env = FrankaLatentAdaptationEnv(object_family=object_family, task_variant=task_variant)
         self.renderer = mujoco.Renderer(self.env.model, width=render_width, height=render_height)
+        self._render_rgb_buffer = np.empty((render_height, render_width, 3), dtype=np.uint8)
         self.event_tracker = EpisodeEventTracker()
         self._instruction = build_instruction(object_family, task_variant)
         self._latest_obs: dict[str, np.ndarray] | None = None
@@ -286,7 +287,8 @@ class AdaptiveBenchmarkSession:
     def render_overview(self) -> np.ndarray:
         """Render the overview camera image."""
         self.renderer.update_scene(self.env.data, camera="overview")
-        return self.renderer.render().copy()
+        self.renderer.render(out=self._render_rgb_buffer)
+        return self._render_rgb_buffer.copy()
 
     def get_public_observation(self, include_image: bool = False) -> dict[str, Any]:
         """Build the non-privileged observation exposed to benchmarked policies.
@@ -453,6 +455,7 @@ def rollout_policy(
     max_steps: int | None = None,
     video_path: Path | None = None,
     video_fps: int = 20,
+    video_buffer_size: int = 64,
 ) -> dict[str, Any]:
     """Roll out one sequential policy episode.
 
@@ -463,6 +466,9 @@ def rollout_policy(
         hidden_context: Hidden body/env context applied to the episode.
         target_xy: Target XY location applied to the episode.
         max_steps: Optional benchmark-side step cap used for smoke tests.
+        video_path: Optional video path written incrementally while the rollout runs.
+        video_fps: Output frames per second for recorded videos.
+        video_buffer_size: Maximum number of captured frames buffered ahead of the encoder thread.
     """
     LOGGER.info(
         "Starting episode seed=%s max_steps=%s requires_image=%s video=%s",
@@ -484,33 +490,46 @@ def rollout_policy(
     external_step_cap_reached = False
     step_limit = None if max_steps is None or int(max_steps) <= 0 else int(max_steps)
     steps_taken = 0
-    video_frames: list[np.ndarray] | None = [] if video_path is not None else None
-    if video_frames is not None:
-        video_frames.append(session.capture_frame())
-    while not (terminated or truncated):
-        if step_limit is not None and steps_taken >= step_limit:
-            external_step_cap_reached = True
-            truncated = True
-            break
-        action = np.asarray(policy.act(observation), dtype=float)
-        next_observation, reward, terminated, truncated, info = session.step(
-            action,
-            include_image=policy.requires_image,
-        )
-        observe_transition = getattr(policy, "observe_transition", None)
-        if callable(observe_transition):
-            observe_transition(observation, action, reward, next_observation, terminated, truncated, info)
-        observation = next_observation
-        steps_taken += 1
-        if video_frames is not None:
-            video_frames.append(session.capture_frame())
-    summary = session.summarize_episode()
-    summary["benchmark_step_cap_reached"] = bool(external_step_cap_reached)
-    summary["benchmark_max_steps"] = int(step_limit) if step_limit is not None else -1
-    if video_frames is not None and video_path is not None:
-        video_path.parent.mkdir(parents=True, exist_ok=True)
-        imageio.mimsave(video_path, video_frames, fps=max(int(video_fps), 1))
-        summary["video_path"] = str(video_path)
+    video_writer = (
+        AsyncVideoWriter(output_path=video_path, fps=video_fps, buffer_size=video_buffer_size)
+        if video_path is not None
+        else None
+    )
+    try:
+        if video_writer is not None:
+            video_writer.submit(resolve_video_frame(observation=observation, capture_frame=session.capture_frame))
+        while not (terminated or truncated):
+            if step_limit is not None and steps_taken >= step_limit:
+                external_step_cap_reached = True
+                truncated = True
+                break
+            action = np.asarray(policy.act(observation), dtype=float)
+            next_observation, reward, terminated, truncated, info = session.step(
+                action,
+                include_image=policy.requires_image,
+            )
+            observe_transition = getattr(policy, "observe_transition", None)
+            if callable(observe_transition):
+                observe_transition(observation, action, reward, next_observation, terminated, truncated, info)
+            observation = next_observation
+            steps_taken += 1
+            if video_writer is not None:
+                video_writer.submit(resolve_video_frame(observation=observation, capture_frame=session.capture_frame))
+        summary = session.summarize_episode()
+        summary["benchmark_step_cap_reached"] = bool(external_step_cap_reached)
+        summary["benchmark_max_steps"] = int(step_limit) if step_limit is not None else -1
+        if video_writer is not None and video_path is not None:
+            video_writer.close()
+            video_writer = None
+            summary["video_path"] = str(video_path)
+    finally:
+        if video_writer is not None:
+            try:
+                video_writer.close()
+            except Exception:
+                if sys.exc_info()[1] is None:
+                    raise
+                LOGGER.exception("Failed to close async video writer for %s during cleanup.", video_path)
     LOGGER.info(
         "Finished episode seed=%s success=%s steps=%s capped=%s duration=%.2fs",
         seed,
@@ -533,6 +552,7 @@ def evaluate_policy(
     max_steps: int | None = None,
     video_dir: Path | None = None,
     video_fps: int = 20,
+    video_buffer_size: int = 64,
 ) -> list[dict[str, Any]]:
     """Evaluate one sequential policy over the selected latent split.
 
@@ -545,6 +565,9 @@ def evaluate_policy(
         seed: Base random seed for deterministic episode construction.
         episodes: Number of episodes to sample from the split distribution.
         max_steps: Optional benchmark-side step cap used for smoke tests.
+        video_dir: Optional directory where per-episode videos are written.
+        video_fps: Output frames per second for recorded videos.
+        video_buffer_size: Maximum number of captured frames buffered ahead of the encoder thread.
     """
     LOGGER.info(
         "Evaluating policy=%s family=%s task=%s split=%s pipeline=%s episodes=%s",
@@ -593,6 +616,7 @@ def evaluate_policy(
                     else video_dir / f"{policy.name}_{family}_{task}_{pipeline_name}_episode{episode_idx:03d}.mp4"
                 ),
                 video_fps=video_fps,
+                video_buffer_size=video_buffer_size,
             )
             row["policy"] = policy.name
             row["split"] = split_name
@@ -705,6 +729,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("benchmark_results/phase1_policy_benchmark.md"))
     parser.add_argument("--video-dir", type=Path, default=None)
     parser.add_argument("--video-fps", type=int, default=20)
+    parser.add_argument("--video-buffer-size", type=int, default=64)
     parser.add_argument("--log-level", type=str, default="INFO")
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -741,6 +766,7 @@ def main() -> None:
                         max_steps=args.max_steps,
                         video_dir=args.video_dir,
                         video_fps=args.video_fps,
+                        video_buffer_size=args.video_buffer_size,
                     )
                     for row in rows:
                         row["family_split"] = args.family_split
