@@ -39,8 +39,12 @@ def test_third_party_panda_xml_defines_hand_wrist_camera_pose():
     hand_body = root.find(".//body[@name='hand']")
     assert hand_body is not None
 
-    camera = hand_body.find("camera[@name='arm_attached']")
+    mount_body = hand_body.find("body[@name='palm_camera_mount']")
+    assert mount_body is not None
+    assert _parse_floats(mount_body.attrib["pos"]) == pytest.approx([0.0, 0.0, 0.092])
+
+    camera = mount_body.find("camera[@name='arm_attached']")
     assert camera is not None
-    assert _parse_floats(camera.attrib["pos"]) == pytest.approx([0.0, -0.055, 0.08])
-    assert _parse_floats(camera.attrib["xyaxes"]) == pytest.approx([1.0, 0.0, 0.0, 0.0, -0.385806, 0.92258])
-    assert float(camera.attrib["fovy"]) == pytest.approx(70.0)
+    assert _parse_floats(camera.attrib["pos"]) == pytest.approx([0.0, 0.0, 0.0])
+    assert _parse_floats(camera.attrib["xyaxes"]) == pytest.approx([-1.0, 0.0, 0.0, 0.0, 0.965926, -0.258819])
+    assert float(camera.attrib["fovy"]) == pytest.approx(84.0)

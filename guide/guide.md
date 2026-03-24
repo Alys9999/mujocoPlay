@@ -59,6 +59,8 @@ Create the repo environment:
 bash scripts/install_env_conda.sh
 ```
 
+On Linux, this installer now also ensures the MuJoCo runtime GL packages are present. If the host says Ubuntu `jammy` but `apt` still points at `focal`, the script will repair the archive codename before installing those runtime packages. Use `SKIP_APT=1` only if the host-side packages are already correct.
+
 Activate it:
 
 ```bash
@@ -390,6 +392,17 @@ Use this order on a fresh server:
 
 - This warning is safe.
 - It means the adapter detected an unusable tokenizer directory and switched to the public fallback tokenizer automatically.
+
+`ImportError: Cannot initialize a EGL device display` followed by `AttributeError: 'GLContext' object has no attribute '_context'`
+
+- MuJoCo auto-selected `MUJOCO_GL=egl`, but the host cannot actually create an EGL renderer.
+- First run `python verify_env.py` and make sure `mujoco_renderer` passes before starting the benchmark smoke test.
+- On Ubuntu `22.04`, check whether `apt` is pointed at the wrong release:
+  `bash scripts/repair_ubuntu_apt_sources.sh`
+- If `/etc/os-release` says `jammy` but the preview still shows `focal` package sources, apply the repair:
+  `bash scripts/repair_ubuntu_apt_sources.sh --apply`
+- The conda installer does not repair system GL runtime packages for you. After fixing apt sources, make sure the host has the runtime libraries used by MuJoCo rendering, especially `libegl1`, `libgl1`, and `libosmesa6`.
+- Re-run `python verify_env.py` after fixing the host so the renderer check goes green.
 
 `dtype=bfloat16` problems on PI05 CUDA
 

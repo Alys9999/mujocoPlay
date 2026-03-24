@@ -48,6 +48,8 @@ Linux/macOS with conda:
 bash scripts/install_env_conda.sh
 ```
 
+On Linux, the conda installer also ensures the MuJoCo runtime GL packages are present and will repair a mismatched Ubuntu archive codename before installing them. Set `SKIP_APT=1` only when those host packages are already in place.
+
 Windows with conda:
 
 ```powershell

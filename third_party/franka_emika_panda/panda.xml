@@ -219,7 +219,7 @@
                            The mount stays on the palm, but sits closer to the pinch opening and
                            looks slightly downward so short objects remain visible too. -->
                       <body name="palm_camera_mount" pos="0 0 0.092">
-                        <camera name="arm_attached" pos="0 0 0" xyaxes="1 0 0 0 -0.965926 0.258819" fovy="84"/>
+                        <camera name="arm_attached" pos="0 0 0" xyaxes="-1 0 0 0 0.965926 -0.258819" fovy="84"/>
                       </body>
                       <site name="wrist_force_site" pos="0 0 0" size="0.005"/>
                       <site name="ee_site" pos="0 0 0.103" size="0.006" rgba="0.85 0.15 0.15 0.7"/>
