@@ -136,6 +136,7 @@ eval "$(conda shell.bash hook)"
 
 conda create -y -n "$ENV_NAME" "python=$PYTHON_VERSION"
 conda activate "$ENV_NAME"
+ACTIVE_PYTHON="$(command -v python)"
 
 PIP_CONFIG_FILE=/dev/null python -m pip install --upgrade pip
 PIP_CONFIG_FILE=/dev/null python -m pip install \
@@ -145,5 +146,14 @@ PIP_CONFIG_FILE=/dev/null python -m pip install \
 PIP_CONFIG_FILE=/dev/null python -m pip install \
   --index-url "https://pypi.org/simple" \
   -r "$ROOT_DIR/requirements.txt"
+PIP_CONFIG_FILE=/dev/null env PATH="/usr/bin:${PATH}" "$ACTIVE_PYTHON" -m pip install \
+  --index-url "https://pypi.org/simple" \
+  --no-build-isolation \
+  "hf-egl-probe==1.0.2" \
+  "egl_probe==1.0.2"
+PIP_CONFIG_FILE=/dev/null python -m pip install \
+  --index-url "https://pypi.org/simple" \
+  "hf-libero>=0.1.3,<0.2.0" \
+  "scipy<2"
 
 python "$ROOT_DIR/verify_env.py"
