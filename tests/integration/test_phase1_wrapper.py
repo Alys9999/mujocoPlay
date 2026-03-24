@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from benchmark.components.robots.franka_panda_2f_v1 import build_phase1_franka_runtime
 from benchmark.schemas.models.action_packet import ActionPacket
@@ -10,6 +10,9 @@ def test_phase1_runtime_wrapper_reset_and_step():
     try:
         observation = runtime.reset(seed=0)
         assert observation.object_family == "block"
+        assert "overview" in observation.images
+        assert "wrist_left" in observation.images
+        assert "wrist_right" in observation.images
         result = runtime.step(
             ActionPacket(
                 schema_id="cartesian_gripper_v1",

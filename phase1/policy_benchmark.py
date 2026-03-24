@@ -284,10 +284,23 @@ class AdaptiveBenchmarkSession:
             action: Policy action to apply in the environment.
             include_image: Whether to include the overview image in the returned observation.
         """
-        action = np.asarray(action, dtype=float).reshape(4)
-        self._previous_action = np.array(action, copy=True)
-        self._action_history.append(np.array(action, copy=True))
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        action = np.asarray(action, dtype=float).reshape(-1)
+        if action.shape[0] == 4:
+            self._previous_action = np.array(action, copy=True)
+            self._action_history.append(np.array(action, copy=True))
+            obs, reward, terminated, truncated, info = self.env.step(action)
+        elif action.shape[0] == 7:
+            absolute_action = np.array(action, copy=True)
+            synthetic_delta = np.zeros(4, dtype=float)
+            mocap_delta = absolute_action[:3] - self.env.data.mocap_pos[0]
+            limit = max(float(self.env.config.action_delta_limit), 1e-6)
+            synthetic_delta[:3] = np.clip(mocap_delta / limit, -1.0, 1.0)
+            synthetic_delta[3] = 1.0 - float(np.clip(absolute_action[6], 0.0, 1.0))
+            self._previous_action = np.array(synthetic_delta, copy=True)
+            self._action_history.append(np.array(synthetic_delta, copy=True))
+            obs, reward, terminated, truncated, info = self.env.step_cartesian(absolute_action)
+        else:
+            raise ValueError(f"Expected action shape (4,) or (7,), got {action.shape}.")
         self._latest_obs = obs
         self._latest_info = info
         public_obs = self.get_public_observation(include_image=include_image)

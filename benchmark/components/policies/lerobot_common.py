@@ -83,6 +83,7 @@ class AbstractLeRobotPolicyAdapter(ABC):
         assert self._preprocess is not None
         assert self._postprocess is not None
 
+        self._latest_observation = observation
         batch = self._build_batch(observation)
         processed = self._preprocess(batch)
         started_at = time.perf_counter()

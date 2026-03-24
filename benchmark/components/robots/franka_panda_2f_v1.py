@@ -35,6 +35,9 @@ class Phase1FrankaPanda2FSceneRuntime:
     def close(self) -> None:
         self._session.close()
 
+    def _requires_rendered_images(self) -> bool:
+        return bool(set(self.camera_names) & {"overview", "wrist_left", "wrist_right"})
+
     def reset(
         self,
         *,
@@ -46,13 +49,13 @@ class Phase1FrankaPanda2FSceneRuntime:
             seed=seed,
             hidden_context=hidden_context,
             target_xy=target_xy,
-            include_image="overview" in self.camera_names,
+            include_image=self._requires_rendered_images(),
         )
         return self._build_observation(legacy_observation)
 
     def step(self, action_packet: ActionPacket) -> StepResult:
         runtime_action = self.control_adapter.to_runtime_action(action_packet)
-        include_image = "overview" in self.camera_names
+        include_image = self._requires_rendered_images()
         if runtime_action.kind == "delta":
             self._latest_action_vector = np.asarray(runtime_action.values, dtype=float).reshape(4)
             legacy_observation, reward, terminated, truncated, info = self._session.step(
@@ -103,6 +106,10 @@ class Phase1FrankaPanda2FSceneRuntime:
         images: dict[str, np.ndarray] = {}
         if "overview_rgb" in legacy_observation:
             images["overview"] = np.asarray(legacy_observation["overview_rgb"], copy=True)
+        if "left_wrist_rgb" in legacy_observation:
+            images["wrist_left"] = np.asarray(legacy_observation["left_wrist_rgb"], copy=True)
+        if "right_wrist_rgb" in legacy_observation:
+            images["wrist_right"] = np.asarray(legacy_observation["right_wrist_rgb"], copy=True)
         metadata = {
             "available_cameras": tuple(sorted(images)),
             "instruction": self._instruction,

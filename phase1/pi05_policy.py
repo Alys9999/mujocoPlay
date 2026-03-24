@@ -64,72 +64,67 @@ def _scale_to_unit_interval(value: np.ndarray, low: np.ndarray, high: np.ndarray
     return np.clip(scaled, -1.0, 1.0)
 
 
+def _quat_wxyz_to_rpy(quat: np.ndarray) -> np.ndarray:
+    w, x, y, z = np.asarray(quat, dtype=np.float32).reshape(4)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    pitch = np.sign(sinp) * (np.pi / 2.0) if abs(sinp) >= 1.0 else np.arcsin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    return np.asarray([roll, pitch, yaw], dtype=np.float32)
+
+
+def _wrap_rpy(angles: np.ndarray) -> np.ndarray:
+    wrapped = (np.asarray(angles, dtype=np.float32) + np.pi) % (2.0 * np.pi) - np.pi
+    return wrapped.astype(np.float32)
+
+
 def benchmark_observation_to_pi05_state(
     observation: dict[str, Any],
     max_episode_steps: int = 1400,
     state_dim: int = 32,
     max_open_aperture: float = 0.04,
-    force_scale: float = 20.0,
-    torque_scale: float = 2.0,
 ) -> np.ndarray:
     from .franka_env import FrankaHiddenPhysicsPickPlaceEnv
 
     cfg = FrankaHiddenPhysicsPickPlaceEnv.DEFAULT_CONFIG
-    family_names = ("block", "cylinder", "small_box")
-    task_names = ("pick_place",)
-    family_index = family_names.index(str(observation["object_family"])) / max(len(family_names) - 1, 1)
-    task_index = task_names.index(str(observation["task_variant"])) / max(len(task_names) - 1, 1)
+    del max_episode_steps
 
-    arm_qpos = np.clip(np.asarray(observation["arm_qpos"], dtype=np.float32) / np.pi, -1.0, 1.0)
     gripper_open = float(np.asarray(observation["gripper_aperture"], dtype=np.float32).reshape(-1)[0]) / max(
         max_open_aperture, 1e-6
     )
     gripper_open = np.asarray([np.clip(2.0 * gripper_open - 1.0, -1.0, 1.0)], dtype=np.float32)
-    wrist_force = np.clip(np.asarray(observation["wrist_force"], dtype=np.float32) / force_scale, -1.0, 1.0)
-    wrist_torque = np.clip(np.asarray(observation["wrist_torque"], dtype=np.float32) / torque_scale, -1.0, 1.0)
     workspace_low = np.asarray([cfg.workspace_x_min, cfg.workspace_y_min, cfg.workspace_z_min], dtype=np.float32)
     workspace_high = np.asarray([cfg.workspace_x_max, cfg.workspace_y_max, cfg.workspace_z_max], dtype=np.float32)
-    target_pos = _scale_to_unit_interval(np.asarray(observation["target_pos"], dtype=np.float32), workspace_low, workspace_high)
-    mocap_target = _scale_to_unit_interval(
-        np.asarray(observation["mocap_target"], dtype=np.float32),
+    eef_position = _scale_to_unit_interval(
+        np.asarray(observation["gripper_pos"], dtype=np.float32),
         workspace_low,
         workspace_high,
     )
-    previous_action = np.asarray(observation["previous_action"], dtype=np.float32).reshape(4)
-    previous_action = np.concatenate(
+    ee_quat_wxyz = np.asarray(observation["ee_quat"], dtype=np.float32).reshape(4)
+    ee_quat_xyzw = np.asarray(
         [
-            np.clip(previous_action[:3], -1.0, 1.0),
-            np.asarray([2.0 * previous_action[3] - 1.0], dtype=np.float32),
-        ]
+            ee_quat_wxyz[1],
+            ee_quat_wxyz[2],
+            ee_quat_wxyz[3],
+            ee_quat_wxyz[0],
+        ],
+        dtype=np.float32,
     )
-    time_frac = np.clip(
-        float(observation["time_sec"]) / max(float(max_episode_steps) * cfg.timestep * cfg.control_substeps, 1e-6),
-        0.0,
-        1.0,
+    libero_state = np.concatenate(
+        [eef_position, np.clip(ee_quat_xyzw, -1.0, 1.0), gripper_open],
+        dtype=np.float32,
     )
-    step_frac = np.clip(float(observation["step_count"]) / max(float(max_episode_steps), 1.0), 0.0, 1.0)
-
-    parts = [
-        arm_qpos,
-        gripper_open,
-        wrist_force,
-        wrist_torque,
-        target_pos,
-        mocap_target,
-        previous_action,
-        np.asarray([2.0 * time_frac - 1.0], dtype=np.float32),
-        np.asarray([2.0 * step_frac - 1.0], dtype=np.float32),
-        np.asarray([2.0 * family_index - 1.0], dtype=np.float32),
-        np.asarray([2.0 * task_index - 1.0], dtype=np.float32),
-    ]
-    state = np.concatenate(parts, dtype=np.float32)
-    if state.shape[0] > state_dim:
-        return state[:state_dim]
-    if state.shape[0] < state_dim:
-        padded = np.zeros(state_dim, dtype=np.float32)
-        padded[: state.shape[0]] = state
-        return padded
-    return state
+    if libero_state.shape[0] >= state_dim:
+        return libero_state[:state_dim]
+    padded = np.zeros(state_dim, dtype=np.float32)
+    padded[: libero_state.shape[0]] = libero_state
+    return padded
 
 
 class PI05SequentialPolicy:
@@ -145,6 +140,7 @@ class PI05SequentialPolicy:
         action_chunk_size: int | None = 10,
         duplicate_overview_to_all_cameras: bool | None = None,
         gripper_index: int = 6,
+        orientation_delta_limit: float = 0.1,
         quantization: str | None = None,
         dtype: str | None = None,
         num_inference_steps: int | None = None,
@@ -156,6 +152,7 @@ class PI05SequentialPolicy:
         self._action_chunk_size = None if action_chunk_size is None else int(action_chunk_size)
         self._duplicate_overview_to_all_cameras = duplicate_overview_to_all_cameras
         self._gripper_index = int(gripper_index)
+        self._orientation_delta_limit = float(orientation_delta_limit)
         self._quantization = None if quantization is None else str(quantization).strip().lower()
         self._dtype = None if dtype is None else str(dtype).strip().lower()
         self._effective_dtype = self._dtype
@@ -225,7 +222,7 @@ class PI05SequentialPolicy:
                 self._cached_action_count(),
             )
         raw_action = np.asarray(pred_action.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
-        return self._to_benchmark_action(raw_action)
+        return self._to_benchmark_action(raw_action, observation)
 
     def needs_image_next_step(self) -> bool:
         return self._cached_action_count() == 0
@@ -469,9 +466,20 @@ class PI05SequentialPolicy:
         }
 
     def _build_batch(self, observation: dict[str, Any]) -> dict[str, Any]:
+        base_image_np = np.asarray(observation.get("base_rgb", observation["overview_rgb"]), dtype=np.uint8)
         base_image = torch.from_numpy(
-            np.asarray(observation.get("base_rgb", observation["overview_rgb"]), dtype=np.uint8)
+            base_image_np
         ).permute(2, 0, 1).contiguous()
+        left_wrist_image = torch.from_numpy(
+            np.asarray(
+                observation.get(
+                    "left_wrist_rgb",
+                    observation.get("arm_rgb", observation["overview_rgb"]),
+                ),
+                dtype=np.uint8,
+            )
+        ).permute(2, 0, 1).contiguous()
+        right_wrist_image = torch.from_numpy(np.zeros_like(base_image_np)).permute(2, 0, 1).contiguous()
         state = torch.from_numpy(
             benchmark_observation_to_pi05_state(
                 observation,
@@ -482,30 +490,24 @@ class PI05SequentialPolicy:
             "observation.state": state,
             "task": str(observation["instruction"]),
             PI05_IMAGE_KEYS[0]: base_image,
+            PI05_IMAGE_KEYS[1]: left_wrist_image,
+            PI05_IMAGE_KEYS[2]: right_wrist_image,
         }
-        if self._duplicate_overview_to_all_cameras:
-            batch[PI05_IMAGE_KEYS[1]] = torch.from_numpy(
-                np.asarray(observation.get("left_wrist_rgb", observation["overview_rgb"]), dtype=np.uint8)
-            ).permute(2, 0, 1).contiguous()
-            batch[PI05_IMAGE_KEYS[2]] = torch.from_numpy(
-                np.asarray(observation.get("right_wrist_rgb", observation["overview_rgb"]), dtype=np.uint8)
-            ).permute(2, 0, 1).contiguous()
-        else:
-            if "left_wrist_rgb" in observation:
-                batch[PI05_IMAGE_KEYS[1]] = torch.from_numpy(
-                    np.asarray(observation["left_wrist_rgb"], dtype=np.uint8)
-                ).permute(2, 0, 1).contiguous()
-            if "right_wrist_rgb" in observation:
-                batch[PI05_IMAGE_KEYS[2]] = torch.from_numpy(
-                    np.asarray(observation["right_wrist_rgb"], dtype=np.uint8)
-                ).permute(2, 0, 1).contiguous()
         return batch
 
-    def _to_benchmark_action(self, raw_action: np.ndarray) -> np.ndarray:
+    def _to_benchmark_action(self, raw_action: np.ndarray, observation: dict[str, Any]) -> np.ndarray:
         action = np.asarray(raw_action, dtype=np.float32).reshape(-1)
         if action.shape[0] < max(7, self._gripper_index + 1):
             raise ValueError(f"Expected at least 7 action dimensions from pi05, got {action.shape}.")
-        benchmark_action = np.zeros(4, dtype=np.float32)
-        benchmark_action[:3] = np.tanh(action[:3])
-        benchmark_action[3] = 0.5 * (np.tanh(action[self._gripper_index]) + 1.0)
-        return benchmark_action
+        from .franka_env import FrankaHiddenPhysicsPickPlaceEnv
+
+        cfg = FrankaHiddenPhysicsPickPlaceEnv.DEFAULT_CONFIG
+        delta_xyz = np.tanh(action[:3]).astype(np.float32) * float(cfg.action_delta_limit)
+        delta_rpy = np.tanh(action[3:6]).astype(np.float32) * self._orientation_delta_limit
+        current_xyz = np.asarray(observation["mocap_target"], dtype=np.float32).reshape(3)
+        current_rpy = _quat_wxyz_to_rpy(np.asarray(observation["ee_quat"], dtype=np.float32))
+        absolute_action = np.zeros(7, dtype=np.float32)
+        absolute_action[:3] = current_xyz + delta_xyz
+        absolute_action[3:6] = _wrap_rpy(current_rpy + delta_rpy)
+        absolute_action[6] = np.clip(0.5 * (np.tanh(action[self._gripper_index]) + 1.0), 0.0, 1.0)
+        return absolute_action

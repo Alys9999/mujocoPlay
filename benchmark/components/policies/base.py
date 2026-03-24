@@ -10,6 +10,28 @@ from benchmark.core.interfaces.observation import ObservationBundle
 from benchmark.schemas.models.action_packet import ActionPacket
 
 
+def quat_wxyz_to_rpy(quat: np.ndarray) -> np.ndarray:
+    """Convert a quaternion in wxyz order into XYZ Euler angles."""
+    w, x, y, z = np.asarray(quat, dtype=np.float32).reshape(4)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    pitch = np.sign(sinp) * (np.pi / 2.0) if abs(sinp) >= 1.0 else np.arcsin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    return np.asarray([roll, pitch, yaw], dtype=np.float32)
+
+
+def wrap_rpy(angles: np.ndarray) -> np.ndarray:
+    """Wrap XYZ Euler angles into [-pi, pi]."""
+    wrapped = (np.asarray(angles, dtype=np.float32) + np.pi) % (2.0 * np.pi) - np.pi
+    return wrapped.astype(np.float32)
+
+
 def observation_to_state_vector(
     observation: ObservationBundle,
     *,
@@ -77,6 +99,50 @@ def observation_to_state_vector(
         padded[: state.shape[0]] = state
         return padded
     return state
+
+
+def observation_to_libero_state_vector(
+    observation: ObservationBundle,
+    *,
+    state_dim: int = 32,
+    max_open_aperture: float = 0.04,
+) -> np.ndarray:
+    """Pack one observation into a LIBERO-style EEF state padded to the pi0.5 max size."""
+    cfg = FrankaHiddenPhysicsPickPlaceEnv.DEFAULT_CONFIG
+    workspace_low = np.asarray([cfg.workspace_x_min, cfg.workspace_y_min, cfg.workspace_z_min], dtype=np.float32)
+    workspace_high = np.asarray([cfg.workspace_x_max, cfg.workspace_y_max, cfg.workspace_z_max], dtype=np.float32)
+
+    def _scale_to_unit_interval(value: np.ndarray) -> np.ndarray:
+        scaled = 2.0 * (value - workspace_low) / np.maximum(workspace_high - workspace_low, 1e-6) - 1.0
+        return np.clip(scaled, -1.0, 1.0)
+
+    gripper_open = np.asarray(
+        [np.clip(2.0 * float(observation.gripper_aperture) / max(max_open_aperture, 1e-6) - 1.0, -1.0, 1.0)],
+        dtype=np.float32,
+    )
+    ee_quat_wxyz = np.asarray(observation.ee_quaternion, dtype=np.float32).reshape(4)
+    ee_quat_xyzw = np.asarray(
+        [
+            ee_quat_wxyz[1],
+            ee_quat_wxyz[2],
+            ee_quat_wxyz[3],
+            ee_quat_wxyz[0],
+        ],
+        dtype=np.float32,
+    )
+    libero_state = np.concatenate(
+        [
+            _scale_to_unit_interval(np.asarray(observation.ee_position, dtype=np.float32)),
+            np.clip(ee_quat_xyzw, -1.0, 1.0),
+            gripper_open,
+        ],
+        dtype=np.float32,
+    )
+    if libero_state.shape[0] >= state_dim:
+        return libero_state[:state_dim]
+    padded = np.zeros(state_dim, dtype=np.float32)
+    padded[: libero_state.shape[0]] = libero_state
+    return padded
 
 
 def delta_action_to_packet(action: np.ndarray, *, source: str) -> ActionPacket:
